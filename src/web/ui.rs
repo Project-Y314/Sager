@@ -35,6 +35,10 @@ pub fn get_dashboard_html() -> &'static str {
             -webkit-font-smoothing: antialiased;
         }
 
+        /* ── Flat, minimal, professional — no shadows anywhere ── */
+        * { box-shadow: none !important; }
+        .shield-icon { filter: none !important; }
+
         body {
             background-color: var(--bg-base);
             color: var(--text-main);
@@ -44,6 +48,84 @@ pub fn get_dashboard_html() -> &'static str {
             overflow-x: hidden;
             font-size: clamp(13px, 1vw, 16px);
         }
+
+        body.tray-right { --rail-margin: 56px; }
+        body.tray-left { --rail-margin: 56px; }
+
+        /* ── Minimal Vertical Tray Rail ── */
+        .tray-rail {
+            position: fixed;
+            top: 0;
+            bottom: 0;
+            width: 56px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 10px;
+            padding: 14px 0;
+            background: #0a0a0a;
+            border: 1px solid var(--border);
+            z-index: 60;
+            transition: transform 0.2s ease;
+        }
+        .tray-rail.right { left: auto; right: 0; border-right: none; border-radius: 0; }
+        .tray-rail.left { left: 0; right: auto; border-left: none; border-radius: 0; }
+
+        .tray-handle {
+            position: absolute;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 10px;
+            height: 34px;
+            background: #0a0a0a;
+            border: 1px solid var(--border);
+            cursor: ew-resize;
+            z-index: 61;
+        }
+        .tray-rail.right .tray-handle { left: -10px; border-left: none; border-radius: 6px 0 0 6px; }
+        .tray-rail.left .tray-handle { right: -10px; border-right: none; border-radius: 0 6px 6px 0; }
+
+        .tray-btn {
+            width: 40px;
+            height: 40px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            background: #0a0a0a;
+            color: var(--text-muted);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 17px;
+            transition: all 0.15s ease;
+        }
+        .tray-btn:hover {
+            background: rgba(255, 255, 255, 0.06);
+            color: var(--text-main);
+            border-color: var(--primary);
+        }
+        .tray-btn.active {
+            background: var(--primary);
+            color: #000;
+            border-color: var(--primary);
+        }
+        .tray-label {
+            position: absolute;
+            pointer-events: none;
+            opacity: 0;
+            visibility: hidden;
+            background: #0a0a0a;
+            border: 1px solid var(--border);
+            color: var(--text-main);
+            font-size: 11px;
+            padding: 4px 8px;
+            border-radius: 6px;
+            white-space: nowrap;
+            transition: opacity 0.15s ease;
+        }
+        .tray-rail.right .tray-label { right: 58px; top: 50%; transform: translateY(-50%); }
+        .tray-rail.left .tray-label { left: 58px; top: 50%; transform: translateY(-50%); }
+        .tray-btn:hover ~ .tray-label, .tray-label:hover { opacity: 1; visibility: visible; }
 
         /* ── Top Header / ProtonVPN Companion Bar ── */
         header {
@@ -154,10 +236,11 @@ pub fn get_dashboard_html() -> &'static str {
             flex: 1;
             padding: clamp(12px, 2vw, 28px);
             max-width: min(100%, 1440px);
-            margin: 0 auto;
+            margin: 0 56px 0 0;
             width: 100%;
             transition: all 0.3s ease;
         }
+        body.tray-left main { margin: 0 0 0 56px; }
 
         @media (max-width: 720px) {
             header { flex-wrap: wrap; gap: 10px; padding: 10px 14px; }
@@ -167,6 +250,9 @@ pub fn get_dashboard_html() -> &'static str {
             .hero-backup-btn { font-size: 13px; padding: 12px 14px; }
             .cloud-sync-strip { flex-direction: column; align-items: flex-start; }
             .ach-matrix-grid { grid-template-columns: 1fr; }
+            .tray-rail { display: none; }
+            main { margin: 0; }
+            body.tray-left main { margin: 0; }
         }
 
         @media (min-width: 1440px) {
@@ -778,6 +864,21 @@ pub fn get_dashboard_html() -> &'static str {
         </div>
     </header>
 
+    <!-- Minimal Vertical Tray Rail (left or right, no shadows) -->
+    <div class="tray-rail right" id="tray-rail">
+        <div class="tray-handle" id="tray-handle" title="Move tray to the other side"></div>
+        <button class="tray-btn" id="tray-btn-backup" title="Backup All Games" onclick="backupAllGames()">💾</button>
+        <button class="tray-btn" id="tray-btn-bg" title="Run in Background / Make Appear" onclick="toggleConsoleFromTray()">🛡️</button>
+        <button class="tray-btn" id="tray-btn-settings" title="Settings" onclick="switchTab('tab-settings')">⚙️</button>
+        <button class="tray-btn" id="tray-btn-test" title="Test Steam Overlay & Sound" onclick="triggerTestUnlock()">🔔</button>
+        <button class="tray-btn" id="tray-btn-side" title="Move Tray to Left/Right" onclick="toggleTraySide()">↔</button>
+        <div class="tray-label" id="tray-label-backup">Backup All</div>
+        <div class="tray-label" id="tray-label-bg">Background / Appear</div>
+        <div class="tray-label" id="tray-label-settings">Settings</div>
+        <div class="tray-label" id="tray-label-test">Test Overlay</div>
+        <div class="tray-label" id="tray-label-side">Move Tray Side</div>
+    </div>
+
     <!-- Navigation Tabs -->
     <nav class="nav-tabs">
         <div class="nav-tab active" onclick="switchTab('tab-companion')">⚡ Companion</div>
@@ -1244,6 +1345,16 @@ pub fn get_dashboard_html() -> &'static str {
                     <div>
                         <label style="font-size: 13px; font-weight: 700;">Google Drive Executable Path (Optional)</label>
                         <input type="text" id="cfg-gdrive-exe" class="form-input" placeholder="Auto-detect" style="margin-top: 6px;" />
+                    </div>
+
+                    <div>
+                        <label style="font-size: 13px; font-weight: 700;">Vertical Tray Position</label>
+                        <div style="display: flex; gap: 6px; margin-top: 6px;">
+                            <button type="button" class="launcher-pill" id="cfg-tray-side-right" onclick="setTraySideUI('right')">Right</button>
+                            <button type="button" class="launcher-pill" id="cfg-tray-side-left" onclick="setTraySideUI('left')">Left</button>
+                            <button type="button" class="launcher-pill" id="cfg-tray-side-auto" onclick="setTraySideUI('auto')">Auto</button>
+                        </div>
+                        <input type="hidden" id="cfg-tray-side" value="right" />
                     </div>
 
                     <button type="submit" class="btn" style="align-self: flex-start; padding: 10px 24px;">💾 Save Settings</button>
@@ -1848,7 +1959,22 @@ pub fn get_dashboard_html() -> &'static str {
                 const bpd = cfg.backups_per_day || 24;
                 document.getElementById('cfg-bpd').value = bpd;
                 updateFreqNotice();
+
+                const traySide = cfg.tray_side || 'right';
+                document.getElementById('cfg-tray-side').value = traySide;
+                document.querySelectorAll('#cfg-tray-side-right, #cfg-tray-side-left, #cfg-tray-side-auto').forEach(btn => {
+                    btn.classList.toggle('active', btn.id === 'cfg-tray-side-' + traySide);
+                });
+                applyTraySide(traySide);
             } catch (e) { console.error(e); }
+        }
+
+        function setTraySideUI(side) {
+            document.getElementById('cfg-tray-side').value = side;
+            document.querySelectorAll('#cfg-tray-side-right, #cfg-tray-side-left, #cfg-tray-side-auto').forEach(btn => {
+                btn.classList.toggle('active', btn.id === 'cfg-tray-side-' + side);
+            });
+            applyTraySide(side);
         }
 
         function setPreset(times) {
@@ -1875,7 +2001,8 @@ pub fn get_dashboard_html() -> &'static str {
                 backup_directory: document.getElementById('cfg-backup-dir').value,
                 auto_backup_interval_minutes: interval,
                 backups_per_day: bpd,
-                google_drive_exe: document.getElementById('cfg-gdrive-exe').value.trim() || null
+                google_drive_exe: document.getElementById('cfg-gdrive-exe').value.trim() || null,
+                tray_side: document.getElementById('cfg-tray-side').value
             };
 
             try {
@@ -1977,10 +2104,80 @@ pub fn get_dashboard_html() -> &'static str {
                 }
                 if (d.console_visible !== undefined) {
                     updateConsoleVisibilityBadge(d.console_visible);
+                    updateTrayBgButton(d.console_visible);
                 }
             } catch (e) {
                 console.error(e);
             }
+        }
+
+        // ── Vertical Tray Rail ──
+        async function loadTraySide() {
+            try {
+                const res = await fetch('/api/config');
+                const cfg = await res.json();
+                applyTraySide(cfg.tray_side || 'right');
+            } catch (e) {
+                applyTraySide('right');
+            }
+        }
+
+        function applyTraySide(side) {
+            const rail = document.getElementById('tray-rail');
+            const body = document.body;
+            body.classList.remove('tray-left', 'tray-right');
+            if (rail) {
+                rail.classList.remove('left', 'right');
+                rail.classList.add(side === 'left' ? 'left' : 'right');
+            }
+            body.classList.add(side === 'left' ? 'tray-left' : 'tray-right');
+            updateTraySideButton(side);
+        }
+
+        async function setTraySide(side) {
+            try {
+                await fetch('/api/config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ tray_side: side })
+                });
+                applyTraySide(side);
+                showToast('✅ Tray moved to ' + (side === 'left' ? 'left' : 'right') + ' side');
+            } catch (e) {
+                logToConsole('Error moving tray: ' + e, 'ERROR');
+            }
+        }
+
+        function toggleTraySide() {
+            const rail = document.getElementById('tray-rail');
+            const current = rail && rail.classList.contains('left') ? 'left' : 'right';
+            setTraySide(current === 'left' ? 'right' : 'left');
+        }
+
+        function updateTraySideButton(side) {
+            const btn = document.getElementById('tray-btn-side');
+            if (!btn) return;
+            btn.textContent = side === 'left' ? '➡' : '⬅';
+            btn.title = side === 'left' ? 'Move Tray to Right' : 'Move Tray to Left';
+        }
+
+        async function toggleConsoleFromTray() {
+            try {
+                const res = await fetch('/api/system/toggle-console', { method: 'POST' });
+                const d = await res.json();
+                updateTrayBgButton(d.visible);
+                showToast(d.message);
+                logToConsole(d.message, d.visible ? 'PASS' : 'INFO');
+            } catch (e) {
+                logToConsole('Error toggling console: ' + e, 'ERROR');
+            }
+        }
+
+        function updateTrayBgButton(visible) {
+            const btn = document.getElementById('tray-btn-bg');
+            if (!btn) return;
+            btn.textContent = visible ? '👁️' : '🛡️';
+            btn.title = visible ? 'Make Console Appear' : 'Run in Background';
         }
 
         // ── Vault Export & Import / Mobile Sync Handlers ──
@@ -2070,6 +2267,7 @@ pub fn get_dashboard_html() -> &'static str {
             loadGames();
             loadAchievementsMatrix();
             loadSystemStatus();
+            loadTraySide();
             loadNetworkInfo();
         });
     </script>

@@ -85,7 +85,7 @@ impl WebServer {
                     let console_visible = crate::tray::is_console_visible();
 
                     let status = json!({
-                        "version": "0.2.0",
+                        "version": "0.3.0",
                         "backup_dir": cfg.backup_directory.to_string_lossy(),
                         "games_count": games.len(),
                         "achievements_count": achievements.len(),
@@ -375,6 +375,12 @@ impl WebServer {
                         if let Some(compact) = val.get("tray_compact_mode").and_then(|v| v.as_bool()) {
                             cfg.tray_compact_mode = compact;
                         }
+                        if let Some(side) = val.get("tray_side").and_then(|v| v.as_str()) {
+                            let s = side.to_lowercase();
+                            if s == "left" || s == "right" || s == "auto" {
+                                cfg.tray_side = s;
+                            }
+                        }
                         if let Some(gdrive) = val.get("google_drive_exe") {
                             if gdrive.is_null() || gdrive.as_str() == Some("") {
                                 cfg.google_drive_exe = None;
@@ -505,7 +511,7 @@ impl WebServer {
                     let local_ip = get_local_ip();
 
                     let resp_body = json!({
-                        "sager_version": "0.2.0",
+                        "sager_version": "0.3.0",
                         "pc_name": std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Sager-PC".to_string()),
                         "local_ip": local_ip,
                         "sync_timestamp": chrono::Utc::now().timestamp(),
@@ -528,7 +534,7 @@ impl WebServer {
 
                     let export_bundle = json!({
                         "format": "sager_vault_export",
-                        "version": "0.2.0",
+                        "version": "0.3.0",
                         "exported_at": now.to_rfc3339(),
                         "timestamp": now.timestamp(),
                         "pc_name": std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Sager-PC".to_string()),

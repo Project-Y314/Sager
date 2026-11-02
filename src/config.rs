@@ -33,10 +33,16 @@ pub struct SagerConfig {
     pub show_in_launcher: bool,
     #[serde(default = "default_true")]
     pub tray_compact_mode: bool,
+    #[serde(default = "default_tray_side")]
+    pub tray_side: String,
 }
 
 fn default_preferred_launcher() -> String {
     "Goldberg SteamEmu".to_string()
+}
+
+fn default_tray_side() -> String {
+    "right".to_string()
 }
 
 fn default_true() -> bool {
@@ -96,6 +102,7 @@ impl Default for SagerConfig {
             preferred_launcher: "Goldberg SteamEmu".to_string(),
             show_in_launcher: true,
             tray_compact_mode: true,
+            tray_side: default_tray_side(),
         }
     }
 }
