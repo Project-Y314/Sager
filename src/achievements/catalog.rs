@@ -234,7 +234,8 @@ impl AchievementCatalog {
         summaries
     }
 
-     Saves\<appid>\achievements.json)
+    /// Parses a Goldberg-style earned achievements file.
+    /// Path example: `Saves\<appid>\achievements.json`
     pub fn parse_earned_file(path: &Path) -> HashMap<String, Option<i64>> {
         let mut map = HashMap::new();
         if !path.exists() {

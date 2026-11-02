@@ -55,7 +55,7 @@ impl SaveScanner {
         if let Ok(appdata) = env::var("APPDATA") {
             let appdata_path = PathBuf::from(&appdata);
             // Scan Goldberg emulator saves explicitly
-            // let goldberg = appdata_path.join("Goldberg SteamEmu Saves");
+            let goldberg = appdata_path.join("Goldberg SteamEmu Saves");
             if goldberg.exists() {
                 Self::scan_goldberg_saves(&goldberg, config, &mut results);
             }
