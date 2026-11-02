@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.ybreakless.sager.data.SagerRepository
+import com.ybreakless.sager.model.DiscoveredPc
 import com.ybreakless.sager.model.MobileSyncPayload
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -26,6 +27,12 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
 
     private val _selectedGameFilter = MutableStateFlow<String?>(null)
     val selectedGameFilter: StateFlow<String?> = _selectedGameFilter.asStateFlow()
+
+    private val _discoveredPcs = MutableStateFlow(emptyList<DiscoveredPc>())
+    val discoveredPcs: StateFlow<List<DiscoveredPc>> = _discoveredPcs.asStateFlow()
+
+    private val _isDiscovering = MutableStateFlow(false)
+    val isDiscovering: StateFlow<Boolean> = _isDiscovering.asStateFlow()
 
     fun getSavedPcHost(): String = repository.getSavedPcHost()
 
@@ -52,6 +59,33 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
             }.onFailure { err ->
                 _syncMessage.value = "Sync failed: ${err.localizedMessage}. Check PC is on same Wi-Fi."
             }
+        }
+    }
+
+    fun discoverPcOnWifi() {
+        viewModelScope.launch {
+            _isDiscovering.value = true
+            try {
+                val found = repository.discoverPcOnWifi()
+                _discoveredPcs.value = found
+                _syncMessage.value = if (found.isEmpty()) "No Sager PC found on Wi-Fi" else "Found ${found.size} Sager PC(s)"
+            } catch (e: Exception) {
+                _syncMessage.value = "Discovery failed: ${e.localizedMessage}"
+            } finally {
+                _isDiscovering.value = false
+            }
+        }
+    }
+
+    fun selectDiscoveredPc(pc: DiscoveredPc) {
+        repository.savePcHost("${pc.ip}:${pc.port}")
+        syncNow("${pc.ip}:${pc.port}")
+    }
+
+    fun pingPc(host: String) {
+        viewModelScope.launch {
+            val reachable = repository.pingPc(host)
+            _syncMessage.value = if (reachable) "PC reachable at $host" else "PC not reachable at $host"
         }
     }
 

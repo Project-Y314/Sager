@@ -24,7 +24,7 @@ data class GameSummary(
 )
 
 data class MobileSyncPayload(
-    val sagerVersion: String = "0.2.0",
+    val sagerVersion: String = "0.3.0",
     val pcName: String = "Sager-PC",
     val localIp: String = "127.0.0.1",
     val syncTimestamp: Long = System.currentTimeMillis() / 1000,
@@ -33,4 +33,10 @@ data class MobileSyncPayload(
     val games: List<GameSummary> = emptyList(),
     val unlockedAchievements: List<Achievement> = emptyList(),
     val preferredLauncher: String = "Goldberg"
+)
+
+data class DiscoveredPc(
+    val ip: String,
+    val pcName: String,
+    val port: Int = 3939
 )

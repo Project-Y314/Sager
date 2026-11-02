@@ -2,6 +2,7 @@ package com.ybreakless.sager.data
 
 import android.content.Context
 import com.ybreakless.sager.model.Achievement
+import com.ybreakless.sager.model.DiscoveredPc
 import com.ybreakless.sager.model.GameSummary
 import com.ybreakless.sager.model.MobileSyncPayload
 import kotlinx.coroutines.Dispatchers
@@ -30,7 +31,7 @@ class SagerRepository(private val context: Context) {
     }
 
     fun getSavedPcHost(): String {
-        return prefs.getString("pc_host", "192.168.0.178:3939") ?: "192.168.0.178:3939"
+        return prefs.getString("pc_host", "") ?: ""
     }
 
     fun savePcHost(host: String) {
@@ -88,6 +89,80 @@ class SagerRepository(private val context: Context) {
         } catch (e: Exception) {
             Result.failure(e)
         }
+    }
+
+    /// Quickly ping a Sager PC by hitting its /api/network-info endpoint.
+    suspend fun pingPc(host: String): Boolean = withContext(Dispatchers.IO) {
+        testConnection(host) != null
+    }
+
+    /// Try to reach /api/network-info on a candidate host; return the payload if successful.
+    private suspend fun testConnection(host: String): MobileSyncPayload? = withContext(Dispatchers.IO) {
+        val cleanHost = host.replace("http://", "").replace("https://", "").trimEnd('/')
+        val url = "http://$cleanHost/api/network-info"
+        try {
+            val conn = URL(url).openConnection() as HttpURLConnection
+            conn.connectTimeout = 1500
+            conn.readTimeout = 1500
+            conn.requestMethod = "GET"
+            if (conn.responseCode == 200) {
+                val reader = BufferedReader(InputStreamReader(conn.inputStream))
+                val sb = StringBuilder()
+                var line: String?
+                while (reader.readLine().also { line = it } != null) sb.append(line)
+                reader.close()
+                val root = JSONObject(sb.toString())
+                val pcName = root.optString("pc_name", "Sager-PC")
+                val port = root.optInt("port", 3939)
+                savePcHost("${cleanHost.split(':').first()}:$port")
+                return@withContext MobileSyncPayload(
+                    sagerVersion = root.optString("sager_version", "0.3.0"),
+                    pcName = pcName,
+                    localIp = root.optString("local_ip", cleanHost.split(':').first()),
+                    syncTimestamp = root.optLong("sync_timestamp", System.currentTimeMillis() / 1000),
+                    totalGames = root.optInt("total_games", 0),
+                    unlockedAchievementsCount = root.optInt("unlocked_achievements_count", 0),
+                    preferredLauncher = root.optString("preferred_launcher", "Goldberg")
+                )
+            }
+            null
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /// Scan likely local gateway/host addresses for a Sager PC on port 3939.
+    suspend fun discoverPcOnWifi(): List<DiscoveredPc> = withContext(Dispatchers.IO) {
+        val candidates = listOf(
+            "192.168.1.1", "192.168.0.1", "10.0.0.1",
+            "192.168.1.100", "192.168.0.100",
+            "192.168.1.50", "192.168.0.50", "10.0.0.50"
+        )
+        val found = mutableListOf<DiscoveredPc>()
+        for (ip in candidates) {
+            try {
+                val url = "http://$ip:3939/api/network-info"
+                val conn = URL(url).openConnection() as HttpURLConnection
+                conn.connectTimeout = 1200
+                conn.readTimeout = 1200
+                conn.requestMethod = "GET"
+                if (conn.responseCode == 200) {
+                    val reader = BufferedReader(InputStreamReader(conn.inputStream))
+                    val sb = StringBuilder()
+                    var line: String?
+                    while (reader.readLine().also { line = it } != null) sb.append(line)
+                    reader.close()
+                    val root = JSONObject(sb.toString())
+                    val pcName = root.optString("pc_name", "Sager-PC")
+                    val port = root.optInt("port", 3939)
+                    found.add(DiscoveredPc(ip, pcName, port))
+                }
+                conn.disconnect()
+            } catch (e: Exception) {
+                // not reachable on this address, keep scanning
+            }
+        }
+        found
     }
 
     suspend fun importVaultJson(jsonStr: String): Result<Int> = withContext(Dispatchers.IO) {

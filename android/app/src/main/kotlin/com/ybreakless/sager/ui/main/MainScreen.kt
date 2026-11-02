@@ -36,6 +36,8 @@ fun MainScreen(
     val isSyncing by viewModel.isSyncing.collectAsStateWithLifecycle()
     val syncMessage by viewModel.syncMessage.collectAsStateWithLifecycle()
     val activeFilter by viewModel.activeFilter.collectAsStateWithLifecycle()
+    val discoveredPcs by viewModel.discoveredPcs.collectAsStateWithLifecycle()
+    val isDiscovering by viewModel.isDiscovering.collectAsStateWithLifecycle()
 
     var showSettingsDialog by remember { mutableStateOf(false) }
     var selectedAchievementForShowoff by remember { mutableStateOf<Achievement?>(null) }
@@ -458,6 +460,86 @@ fun MainScreen(
                         fontSize = 10.sp,
                         color = Color(0xFF71717A)
                     )
+
+                    // ── Discover Sager PC on Wi-Fi ──
+                    Text(
+                        "Or discover a Sager PC on this Wi-Fi:",
+                        fontSize = 11.sp,
+                        color = Color(0xFFA1A1AA),
+                        modifier = Modifier.padding(top = 6.dp)
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = { viewModel.discoverPcOnWifi() },
+                            enabled = !isDiscovering,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFF18181B),
+                                contentColor = Color.White
+                            ),
+                            shape = RoundedCornerShape(6.dp)
+                        ) {
+                            if (isDiscovering) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp,
+                                    color = Color.White
+                                )
+                            } else {
+                                Text("DISCOVER PC", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                        if (discoveredPcs.isNotEmpty()) {
+                            Text(
+                                "${discoveredPcs.size} found",
+                                fontSize = 10.sp,
+                                color = Color(0xFF71717A)
+                            )
+                        }
+                    }
+                    if (discoveredPcs.isNotEmpty()) {
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            discoveredPcs.forEach { pc ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = pc.pcName,
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color.White,
+                                            maxLines = 1,
+                                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                                        )
+                                        Text(
+                                            text = "${pc.ip}:${pc.port}",
+                                            fontSize = 10.sp,
+                                            color = Color(0xFF71717A),
+                                            maxLines = 1,
+                                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                                        )
+                                    }
+                                    TextButton(
+                                        onClick = { viewModel.selectDiscoveredPc(pc) },
+                                        colors = ButtonDefaults.textButtonColors(contentColor = Color.White)
+                                    ) {
+                                        Text("USE", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                    }
+                                }
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(1.dp)
+                                        .background(Color(0xFF27272A))
+                                        .padding(vertical = 6.dp)
+                                )
+                            }
+                        }
+                    }
                 }
             },
             confirmButton = {
