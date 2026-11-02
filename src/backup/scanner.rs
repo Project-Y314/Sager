@@ -21,9 +21,9 @@ impl SaveScanner {
     pub fn scan_all(config: &SagerConfig) -> Vec<DiscoveredGame> {
         let mut results = Vec::new();
 
-        // 1. Saved Games (%USERPROFILE%/Saved Games)
+        
         if let Ok(userprofile) = env::var("USERPROFILE") {
-            let saved_games_dir = PathBuf::from(&userprofile).join("Saved Games");
+            let saved_games_dir = PathBuf::from("Saved Games");
             Self::scan_folder(&saved_games_dir, "Saved Games", &mut results);
 
             // 2. Documents / My Games & Documents game folders
@@ -55,7 +55,7 @@ impl SaveScanner {
         if let Ok(appdata) = env::var("APPDATA") {
             let appdata_path = PathBuf::from(&appdata);
             // Scan Goldberg emulator saves explicitly
-            let goldberg = appdata_path.join("Goldberg SteamEmu Saves");
+            // let goldberg = appdata_path.join("Goldberg SteamEmu Saves");
             if goldberg.exists() {
                 Self::scan_goldberg_saves(&goldberg, config, &mut results);
             }

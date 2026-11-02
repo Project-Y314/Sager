@@ -234,7 +234,7 @@ impl AchievementCatalog {
         summaries
     }
 
-    /// Parses an earned achievements JSON file (e.g. %APPDATA%\Goldberg SteamEmu Saves\<appid>\achievements.json)
+     Saves\<appid>\achievements.json)
     pub fn parse_earned_file(path: &Path) -> HashMap<String, Option<i64>> {
         let mut map = HashMap::new();
         if !path.exists() {
