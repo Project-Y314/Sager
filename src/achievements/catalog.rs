@@ -207,7 +207,7 @@ impl AchievementCatalog {
             let launcher_label = if game_name.to_lowercase().contains("lightning") {
                 "Project Lightning".to_string()
             } else {
-                config.preferred_launcher.clone()
+                "Steam".to_string()
             };
 
             summaries.push(GameAchievementSummary {

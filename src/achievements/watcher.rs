@@ -232,7 +232,7 @@ impl AchievementWatcher {
                         unlocked: true,
                         unlock_time,
                         icon_path: None,
-                        launcher: Some(config.preferred_launcher.clone()),
+                        launcher: None,
                         hidden: false,
                     });
                 }
@@ -275,7 +275,7 @@ impl AchievementWatcher {
                             unlocked: true,
                             unlock_time,
                             icon_path: None,
-                            launcher: Some(config.preferred_launcher.clone()),
+                            launcher: None,
                             hidden: false,
                         });
                     }

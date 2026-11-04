@@ -113,7 +113,7 @@ impl SaveArchiver {
             backup_date_str: now.format("%Y-%m-%d %H:%M:%S").to_string(),
             total_files,
             total_bytes,
-            sager_version: "0.1.0".to_string(),
+            sager_version: env!("CARGO_PKG_VERSION").to_string(),
         };
 
         let manifest_json = serde_json::to_string_pretty(&manifest)
@@ -134,6 +134,9 @@ impl SaveArchiver {
         // Update latest.json
         let latest_path = game_backup_dir.join("latest.json");
         let _ = fs::write(&latest_path, &manifest_json);
+
+        // Keep only the newest archives per game so the cloud folder stays tidy
+        Self::prune_old_backups(&game_backup_dir, 10);
 
         let size_bytes = fs::metadata(&zip_path).map(|m| m.len()).unwrap_or(total_bytes);
 
@@ -175,5 +178,110 @@ impl SaveArchiver {
             }
         }
         max_mtime
+    }
+
+    /// Keep only the newest `keep` timestamped zip archives per game.
+    /// Older zip + manifest json pairs are removed so Google Drive never
+    /// fills up with hundreds of snapshots. Safety backups (separate
+    /// `*_safety_before_restore` folders) are never touched.
+    fn prune_old_backups(game_backup_dir: &Path, keep: usize) {
+        let Ok(entries) = fs::read_dir(game_backup_dir) else {
+            return;
+        };
+
+        let mut archives: Vec<PathBuf> = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() && path.extension().map_or(false, |e| e == "zip") {
+                archives.push(path);
+            }
+        }
+
+        // Newest first (timestamped filenames sort lexicographically)
+        archives.sort();
+        archives.reverse();
+
+        for old_zip in archives.into_iter().skip(keep) {
+            let _ = fs::remove_file(&old_zip);
+            let old_json = old_zip.with_extension("json");
+            if old_json.exists() {
+                let _ = fs::remove_file(old_json);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::restore::SaveRestore;
+    use std::io::Write as _;
+
+    fn temp_root(sub: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("sager_test_{}", sub));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn backup_then_restore_roundtrip() {
+        // Fake game save folder
+        let root = temp_root("src");
+        let save = root.join("MyGame");
+        fs::create_dir_all(&save).unwrap();
+        fs::write(save.join("progress.dat"), b"level 7 boss down").unwrap();
+
+        // Fake backup target (Google Drive)
+        let mut cfg = SagerConfig::default();
+        cfg.backup_directory = root.join("Backups");
+
+        let info = SaveArchiver::backup_game("My Game", &save, &cfg).unwrap();
+        assert!(info.full_path.is_file());
+
+        // Manifest must round-trip through the zip
+        let manifest = SaveRestore::read_manifest_from_zip(&info.full_path).unwrap();
+        assert_eq!(manifest.game_name, "My Game");
+
+        // Modify the save after the backup (like the game would)
+        fs::write(save.join("progress.dat"), b"level 9 new run").unwrap();
+
+        // Restore the newest archive — must overwrite the newer local save
+        let backups = SaveRestore::list_backups_for_game("My Game", &cfg);
+        assert_eq!(backups.len(), 1);
+        let result = SaveRestore::restore_backup(&backups[0].full_path, None, &cfg).unwrap();
+        assert_eq!(result.game_name, "My Game");
+        assert_eq!(fs::read(save.join("progress.dat")).unwrap(), b"level 7 boss down");
+
+        // Safety copy for the replaced save must exist
+        assert!(result.safety_backup_path.is_some());
+
+        let _ = fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn pruning_keeps_only_newest_archives() {
+        let root = temp_root("prune");
+        let save = root.join("GamePrune");
+        fs::create_dir_all(&save).unwrap();
+        fs::write(save.join("a.dat"), "data").unwrap();
+
+        let mut cfg = SagerConfig::default();
+        cfg.backup_directory = root.join("Backups");
+
+        // Make several archives: each pass writes new content so the
+        // differential check re-archives instead of skipping.
+        for i in 0..14 {
+            fs::write(save.join("a.dat"), format!("data {i}")).unwrap();
+            SaveArchiver::backup_game("GamePrune", &save, &cfg).unwrap();
+            if i < 13 {
+                std::thread::sleep(std::time::Duration::from_millis(1100));
+            }
+        }
+
+        let remaining = SaveRestore::list_backups_for_game("GamePrune", &cfg).len();
+        assert!(remaining <= 10, "expected <=10 archives after pruning, got {remaining}");
+
+        let _ = fs::remove_dir_all(&root).ok();
     }
 }

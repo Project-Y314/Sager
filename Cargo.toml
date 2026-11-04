@@ -1,6 +1,6 @@
 [package]
 name = "sager"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 authors = ["Sager Team"]
 description = "Sager - Windows System Tray Game Companion for Steam Achievements & Ludusavi-style Save Backups"
@@ -26,10 +26,6 @@ windows-sys = { version = "0.59", features = [
 [[bin]]
 name = "sager"
 path = "src/main.rs"
-
-[[bin]]
-name = "sager-min"
-path = "src/bin/minimal_app.rs"
 
 [profile.release]
 opt-level = 3

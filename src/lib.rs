@@ -1,5 +1,4 @@
-// Sager library — shared backend used by the `sager` (tray) binary and the
-// `sager-min` (minimal dashboard) binary. Ships as a single `sager.exe`.
+// Sager — Windows tray app + embedded dashboard, one pure-Rust binary.
 
 pub mod achievements;
 pub mod audio;
@@ -25,10 +24,10 @@ extern "system" {
 }
 const ATTACH_PARENT_PROCESS: u32 = 0xFFFFFFFF;
 
-/// Main entry point for the `sager.exe` tray product.
-/// Runs silently in the Windows system tray with the embedded web dashboard.
+/// Entry point: runs silently in the Windows system tray with the dashboard on localhost.
 pub fn run() {
     let args: Vec<String> = std::env::args().collect();
+    // Show logs when launched from a terminal with --console / --debug
     if args.iter().any(|a| a == "--console" || a == "--debug") {
         unsafe {
             AttachConsole(ATTACH_PARENT_PROCESS);
@@ -36,157 +35,134 @@ pub fn run() {
     }
 
     let config = load_config();
-    let open_ui_on_start = args.iter().any(|a| a == "--ui" || a == "--dashboard" || a == "-d");
-
-    // Automatically ensure Sager boots with Windows silently in tray
-    ensure_auto_startup();
-    // Register Sager in the application list (Desktop + Start Menu shortcuts)
-    ensure_app_list_entry();
+    // `--ui` opens the dashboard immediately (handy when launching manually)
+    let open_ui = args.iter().any(|a| a == "--ui" || a == "--dashboard");
+    let port = config.web_port;
 
     let shared_config = Arc::new(Mutex::new(config));
     let (tx, rx) = channel::<AchievementNotification>();
 
-    // 1. Start Achievement Watcher
+    // 1. Achievement watcher → tray notifications
     let watcher = AchievementWatcher::new(tx.clone());
     watcher.start(Arc::clone(&shared_config));
-    println!(">> Achievement Watcher started.");
+    println!("Achievement watcher running.");
 
-    // 2. Start Embedded Web Server & Dashboard
-    WebServer::start(Arc::clone(&shared_config), tx.clone());
-    println!(">> Web Dashboard started on http://127.0.0.1:3939");
-    if open_ui_on_start {
-        let _ = open::that("http://127.0.0.1:3939");
+    // 2. Dashboard on localhost
+    WebServer::start(Arc::clone(&shared_config));
+    println!("Dashboard: http://127.0.0.1:{}", port);
+    if open_ui {
+        let dashboard = format!("http://127.0.0.1:{}", port);
+        let _ = open::that(&dashboard);
     }
 
-    // 3. Start Background Auto-Backup Thread
+    // 3. Background auto-backup loop
     let backup_config = Arc::clone(&shared_config);
-    thread::spawn(move || {
-        loop {
-            let (enabled, interval_mins) = {
-                let cfg = backup_config.lock().unwrap();
-                (cfg.auto_backup_enabled, cfg.auto_backup_interval_minutes)
-            };
+    thread::spawn(move || loop {
+        let (enabled, interval_mins) = {
+            let cfg = backup_config.lock().unwrap();
+            (cfg.auto_backup_enabled, cfg.auto_backup_interval_minutes)
+        };
 
-            if enabled {
-                thread::sleep(Duration::from_secs(interval_mins.max(5) * 60));
-                let cfg = backup_config.lock().unwrap().clone();
-                let results = SaveArchiver::backup_all(&cfg);
-                let successes = results.iter().filter(|r| r.is_ok()).count();
-                println!(">> [Auto-Backup] Backed up {} of {} games to {}", successes, results.len(), cfg.backup_directory.display());
-            } else {
-                thread::sleep(Duration::from_secs(60));
-            }
+        if enabled {
+            thread::sleep(Duration::from_secs(interval_mins.max(5) * 60));
+            let cfg = backup_config.lock().unwrap().clone();
+            let results = SaveArchiver::backup_all(&cfg);
+            let successes = results.iter().filter(|r| r.is_ok()).count();
+            println!(
+                "Auto-backup: {} of {} games saved to {}",
+                successes,
+                results.len(),
+                cfg.backup_directory.display()
+            );
+        } else {
+            thread::sleep(Duration::from_secs(60));
         }
     });
 
-    // 4. Initialize Windows System Tray Icon
-    println!(">> Initializing Windows System Tray...");
-    if let Ok(tray) = SystemTray::new() {
-        let handle = tray.handle();
-        start_notification_listener(handle, rx, Arc::clone(&shared_config));
+    // 4. System tray icon (message loop runs until the user exits)
+    println!("Adding tray icon…");
+    match SystemTray::new(port) {
+        Ok(tray) => {
+            let handle = tray.handle();
+            start_notification_listener(handle, rx, Arc::clone(&shared_config));
 
-        // Startup notification
-        let sound = shared_config.lock().unwrap().sound_enabled;
-        handle.show_balloon_notification(
-            "🎮 Sager Activated",
-            "Monitoring Steam / Project Lightning achievements & syncing game saves!",
-            sound,
-        );
+            handle.show_balloon_notification(
+                "Sager is watching",
+                "Achievement alerts and save backups are on. Click the icon to open your dashboard.",
+                false,
+            );
 
-        println!(">> Sager system tray icon added. Running message loop...");
-        tray.run_message_loop();
-        println!(">> Sager shutting down cleanly.");
+            println!("Tray icon added. Running…");
+            tray.run_message_loop();
+            println!("Sager closed.");
+        }
+        Err(e) => {
+            eprintln!("Tray unavailable: {}. Dashboard stays open on http://127.0.0.1:{}", e, port);
+            // Keep the backend alive so the dashboard still works
+            loop {
+                thread::sleep(Duration::from_secs(3600));
+            }
+        }
+    }
+}
+
+const STARTUP_LNK: &str = r"Microsoft\Windows\Start Menu\Programs\Startup\Sager.lnk";
+
+/// Create or remove the "Start with Windows" shortcut. Returns (installed, message).
+pub fn set_windows_startup(enable: bool) -> Result<(bool, String), String> {
+    let appdata = std::env::var("APPDATA").map_err(|_| "APPDATA not available".to_string())?;
+    let lnk = std::path::PathBuf::from(&appdata).join(STARTUP_LNK);
+
+    let exe_path = std::env::current_exe().map_err(|_| "cannot locate sager.exe".to_string())?;
+    let exe_name = exe_path
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if !exe_name.starts_with("sager") {
+        return Err(format!("{} is not Sager itself; start with Windows not configured", exe_path.display()));
+    }
+
+    let installed = lnk.exists();
+    if enable && installed {
+        return Ok((true, "Sager already starts with Windows".to_string()));
+    }
+    if !enable && !installed {
+        return Ok((false, "Sager does not start with Windows".to_string()));
+    }
+
+    if enable {
+        create_shortcut(&exe_path, &lnk)?;
+        Ok((true, "Sager will start with Windows (silent, in the tray)".to_string()))
     } else {
-        println!(">> Background engine active. Waiting for interactive desktop tray...");
-        // Keep web server and watcher active and retry connecting to tray
-        loop {
-            thread::sleep(Duration::from_secs(5));
-            if let Ok(tray) = SystemTray::new() {
-                let handle = tray.handle();
-                start_notification_listener(handle, rx, Arc::clone(&shared_config));
-                let sound = shared_config.lock().unwrap().sound_enabled;
-                handle.show_balloon_notification(
-                    "🎮 Sager Activated",
-                    "Monitoring Steam / Project Lightning achievements & syncing game saves!",
-                    sound,
-                );
-                println!(">> Sager system tray icon connected! Running message loop...");
-                tray.run_message_loop();
-                break;
-            }
-        }
+        std::fs::remove_file(&lnk)
+            .map_err(|e| format!("Could not remove startup shortcut: {}", e))?;
+        Ok((false, "Sager will not start with Windows anymore".to_string()))
     }
 }
 
-fn ensure_auto_startup() {
-    if let Ok(appdata) = std::env::var("APPDATA") {
-        let lnk = std::path::PathBuf::from(&appdata)
-            .join(r"Microsoft\Windows\Start Menu\Programs\Startup\Sager.lnk");
-        if !lnk.exists() {
-            if let Ok(exe_path) = std::env::current_exe() {
-                let file_name = exe_path.file_name().and_then(|f| f.to_str()).unwrap_or("");
-                if file_name.to_lowercase().starts_with("sager") {
-                    let cur_dir = exe_path
-                        .parent()
-                        .unwrap_or_else(|| std::path::Path::new(r"C:\Mein Projekts\Sager"));
-                    let ps_cmd = format!(
-                        "$s = (New-Object -ComObject WScript.Shell).CreateShortcut('{}'); $s.TargetPath = '{}'; $s.WorkingDirectory = '{}'; $s.Save()",
-                        lnk.to_string_lossy().replace('\'', "''"),
-                        exe_path.to_string_lossy().replace('\'', "''"),
-                        cur_dir.to_string_lossy().replace('\'', "''"),
-                    );
-                    let _ = std::process::Command::new("powershell")
-                        .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &ps_cmd])
-                        .output();
-                }
-            }
-        }
-    }
-}
-
-/// Create a Windows .lnk shortcut pointing `lnk` at `target`.
-fn create_shortcut(target: &std::path::Path, lnk: &std::path::Path) {
+fn create_shortcut(target: &std::path::Path, lnk: &std::path::Path) -> Result<(), String> {
     if let Some(parent) = lnk.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Could not open the Startup folder: {}", e))?;
     }
-    let cur_dir = target.parent().unwrap_or(std::path::Path::new(r"C:\"));
+    let cur_dir = target.parent().unwrap_or_else(|| std::path::Path::new("."));
     let ps_cmd = format!(
         "$s = (New-Object -ComObject WScript.Shell).CreateShortcut('{}'); $s.TargetPath = '{}'; $s.WorkingDirectory = '{}'; $s.Save()",
         lnk.to_string_lossy().replace('\'', "''"),
         target.to_string_lossy().replace('\'', "''"),
         cur_dir.to_string_lossy().replace('\'', "''"),
     );
-    let _ = std::process::Command::new("powershell")
+    let out = std::process::Command::new("powershell")
         .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &ps_cmd])
-        .output();
-}
-
-/// Register Sager in the Windows application list (Desktop + Start Menu).
-fn ensure_app_list_entry() {
-    let exe = match std::env::current_exe() {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    let file_name = exe.file_name().and_then(|f| f.to_str()).unwrap_or("");
-    if !file_name.to_lowercase().starts_with("sager") {
-        return;
-    }
-    if let Ok(profile) = std::env::var("USERPROFILE") {
-        let desktop = std::path::PathBuf::from(&profile).join("Desktop").join("Sager.lnk");
-        if !desktop.exists() {
-            create_shortcut(&exe, &desktop);
-        }
-        let start_menu = std::path::PathBuf::from(&profile)
-            .join("AppData")
-            .join("Roaming")
-            .join("Microsoft")
-            .join("Windows")
-            .join("Start Menu")
-            .join("Programs")
-            .join("Sager.lnk");
-        if !start_menu.exists() {
-            create_shortcut(&exe, &start_menu);
-        }
+        .output()
+        .map_err(|e| format!("Could not create the startup shortcut: {}", e))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Could not create the startup shortcut: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ))
     }
 }
-

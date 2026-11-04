@@ -1,10 +1,10 @@
-use crate::achievements::{load_achievements_history, Achievement, AchievementNotification};
+use crate::achievements::{load_achievements_history};
 use crate::backup::{SaveArchiver, SaveRestore, SaveScanner};
-use crate::config::{self, save_config, SagerConfig};
+use crate::config::{self, get_drive_status, save_config, SagerConfig};
 use crate::web::ui::get_dashboard_html;
+use crate::set_windows_startup;
 use serde_json::json;
 use std::path::PathBuf;
-use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use tiny_http::{Header, Method, Response, Server, StatusCode};
@@ -12,34 +12,20 @@ use tiny_http::{Header, Method, Response, Server, StatusCode};
 pub struct WebServer;
 
 impl WebServer {
-    pub fn start(
-        config_provider: Arc<Mutex<SagerConfig>>,
-        notifier_tx: Sender<AchievementNotification>,
-    ) {
+    pub fn start(config_provider: Arc<Mutex<SagerConfig>>) {
         thread::spawn(move || {
-            let port = {
-                let cfg = config_provider.lock().unwrap();
-                cfg.web_port
-            };
+            let port = config_provider.lock().unwrap().web_port;
 
-            let bind_addr = format!("0.0.0.0:{}", port);
+            let bind_addr = format!("127.0.0.1:{}", port);
             let server = match Server::http(&bind_addr) {
                 Ok(s) => s,
-                Err(_) => {
-                    let fallback = format!("127.0.0.1:{}", port);
-                    match Server::http(&fallback) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            eprintln!("Failed to start Sager web server on {}: {}", fallback, e);
-                            return;
-                        }
-                    }
+                Err(e) => {
+                    eprintln!("Failed to start Sager web server on {}: {}", bind_addr, e);
+                    return;
                 }
             };
 
-            let local_ip = get_local_ip();
-            println!("Sager Web Companion active on http://127.0.0.1:{}", port);
-            println!("Home Wi-Fi Mobile Sync active on http://{}:{}/api/mobile/sync", local_ip, port);
+            println!("Sager dashboard running at http://127.0.0.1:{}", port);
 
             for mut req in server.incoming_requests() {
                 let url = req.url().to_string();
@@ -54,17 +40,17 @@ impl WebServer {
                 .unwrap();
 
                 if url == "/" && method == Method::Get {
-                    let html = get_dashboard_html();
-                    let resp = Response::from_string(html).with_header(html_header);
+                    let resp = Response::from_string(get_dashboard_html()).with_header(html_header);
                     let _ = req.respond(resp);
                     continue;
                 }
 
-                if (url == "/api/logo" || url == "/api/logo-full") && method == Method::Get {
-                    let logo_bytes: &[u8] = include_bytes!("../../assets/sager-icon.svg");
+                if url == "/api/logo" && method == Method::Get {
                     let svg_header =
                         Header::from_bytes(&b"Content-Type"[..], &b"image/svg+xml"[..]).unwrap();
-                    let resp = Response::from_data(logo_bytes).with_header(svg_header);
+                    let resp =
+                        Response::from_data(include_bytes!("../../assets/sager-icon.svg").to_vec())
+                            .with_header(svg_header);
                     let _ = req.respond(resp);
                     continue;
                 }
@@ -73,84 +59,34 @@ impl WebServer {
                     let cfg = config_provider.lock().unwrap().clone();
                     let games = SaveScanner::scan_all(&cfg);
                     let achievements = load_achievements_history();
-                    let drive = config::get_drive_status(&cfg);
-
-                    let startup_installed = if let Ok(appdata) = std::env::var("APPDATA") {
-                        PathBuf::from(appdata)
-                            .join(r"Microsoft\Windows\Start Menu\Programs\Startup\Sager.lnk")
-                            .exists()
-                    } else {
-                        false
-                    };
-                    let console_visible = crate::tray::is_console_visible();
+                    let drive = get_drive_status(&cfg);
+                    // Can we actually write there right now?
+                    let backup_dir_accessible = cfg.backup_directory.exists()
+                        || std::fs::create_dir_all(&cfg.backup_directory).is_ok();
 
                     let status = json!({
-                        "version": "0.3.0",
+                        "version": env!("CARGO_PKG_VERSION"),
                         "backup_dir": cfg.backup_directory.to_string_lossy(),
                         "games_count": games.len(),
                         "achievements_count": achievements.len(),
                         "auto_backup_enabled": cfg.auto_backup_enabled,
-                        "auto_backup_interval": cfg.auto_backup_interval_minutes,
-                        "backups_per_day": cfg.get_backups_per_day(),
+                        "auto_backup_interval_minutes": cfg.auto_backup_interval_minutes,
                         "sound_enabled": cfg.sound_enabled,
+                        "notifications_enabled": cfg.notifications_enabled,
+                        "backup_dir_accessible": backup_dir_accessible,
                         "google_drive_running": drive.google_drive_running,
                         "google_drive_installed": drive.google_drive_installed,
-                        "backup_dir_exists": drive.backup_dir_exists,
-                        "backup_dir_is_google_drive": drive.backup_dir_is_google_drive,
-                        "preferred_launcher": cfg.preferred_launcher,
-                        "show_in_launcher": cfg.show_in_launcher,
-                        "tray_compact_mode": cfg.tray_compact_mode,
-                        "console_visible": console_visible,
-                        "startup_installed": startup_installed,
+                        "startup_enabled": is_startup_installed(),
                     });
-
-                    let resp =
-                        Response::from_string(status.to_string()).with_header(json_header);
+                    let resp = Response::from_string(status.to_string()).with_header(json_header);
                     let _ = req.respond(resp);
-                    continue;
-                }
-
-                if url == "/api/drive-status" && method == Method::Get {
-                    let cfg = config_provider.lock().unwrap().clone();
-                    let drive = config::get_drive_status(&cfg);
-                    let resp = Response::from_string(
-                        serde_json::to_string(&drive).unwrap_or_default(),
-                    )
-                    .with_header(json_header);
-                    let _ = req.respond(resp);
-                    continue;
-                }
-
-                if url == "/api/launch-gdrive" && method == Method::Post {
-                    let cfg = config_provider.lock().unwrap().clone();
-                    match config::launch_google_drive(&cfg) {
-                        Ok(()) => {
-                            let resp_body = json!({
-                                "success": true,
-                                "message": "Google Drive is starting up..."
-                            });
-                            let resp = Response::from_string(resp_body.to_string())
-                                .with_header(json_header);
-                            let _ = req.respond(resp);
-                        }
-                        Err(e) => {
-                            let resp_body = json!({
-                                "success": false,
-                                "message": e
-                            });
-                            let resp = Response::from_string(resp_body.to_string())
-                                .with_header(json_header);
-                            let _ = req.respond(resp);
-                        }
-                    }
                     continue;
                 }
 
                 if url == "/api/games" && method == Method::Get {
                     let cfg = config_provider.lock().unwrap().clone();
-                    let games = SaveScanner::scan_all(&cfg);
                     let resp = Response::from_string(
-                        serde_json::to_string(&games).unwrap_or_default(),
+                        serde_json::to_string(&list_games_with_backup_info(&cfg)).unwrap_or_default(),
                     )
                     .with_header(json_header);
                     let _ = req.respond(resp);
@@ -172,58 +108,28 @@ impl WebServer {
                     let mut body = String::new();
                     let _ = req.as_reader().read_to_string(&mut body);
                     let cfg = config_provider.lock().unwrap().clone();
+                    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
 
-                    let parsed: serde_json::Value =
-                        serde_json::from_str(&body).unwrap_or_default();
-                    if parsed
+                    let message = if parsed
                         .get("all")
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false)
                     {
                         let res = SaveArchiver::backup_all(&cfg);
-                        let success_count = res.iter().filter(|r| r.is_ok()).count();
-                        let total = res.len();
-
-                        let resp_body = json!({
-                            "success": true,
-                            "message": format!("Backed up {} of {} game saves to {}", success_count, total, cfg.backup_directory.display())
-                        });
-                        let resp = Response::from_string(resp_body.to_string())
-                            .with_header(json_header);
-                        let _ = req.respond(resp);
+                        let success = res.iter().filter(|r| r.is_ok()).count();
+                        format!("Backed up {} of {} games to {}", success, res.len(), cfg.backup_directory.display())
                     } else {
-                        let name = parsed
-                            .get("game_name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("Game");
-                        let path_str = parsed
-                            .get("source_path")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        let path = PathBuf::from(path_str);
-
-                        match SaveArchiver::backup_game(name, &path, &cfg) {
-                            Ok(info) => {
-                                let resp_body = json!({
-                                    "success": true,
-                                    "message": format!("Successfully backed up {} ({})", name, info.file_name),
-                                    "backup": info
-                                });
-                                let resp = Response::from_string(resp_body.to_string())
-                                    .with_header(json_header);
-                                let _ = req.respond(resp);
-                            }
-                            Err(e) => {
-                                let resp_body = json!({
-                                    "success": false,
-                                    "message": format!("Failed to backup {}: {}", name, e)
-                                });
-                                let resp = Response::from_string(resp_body.to_string())
-                                    .with_header(json_header);
-                                let _ = req.respond(resp);
-                            }
+                        let name = parsed.get("game_name").and_then(|v| v.as_str()).unwrap_or("Game");
+                        let path = parsed.get("source_path").and_then(|v| v.as_str()).unwrap_or("");
+                        match SaveArchiver::backup_game(name, &PathBuf::from(path), &cfg) {
+                            Ok(info) => format!("Backed up {} ({})", name, info.file_name),
+                            Err(e) => format!("Backup failed for {}: {}", name, e),
                         }
-                    }
+                    };
+
+                    let resp = Response::from_string(json!({ "message": message }).to_string())
+                        .with_header(json_header);
+                    let _ = req.respond(resp);
                     continue;
                 }
 
@@ -231,36 +137,25 @@ impl WebServer {
                     let mut body = String::new();
                     let _ = req.as_reader().read_to_string(&mut body);
                     let cfg = config_provider.lock().unwrap().clone();
-
-                    let parsed: serde_json::Value =
-                        serde_json::from_str(&body).unwrap_or_default();
-                    let zip_str = parsed
+                    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+                    let zip_path = parsed
                         .get("zip_path")
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
-                    let zip_path = PathBuf::from(zip_str);
 
-                    match SaveRestore::restore_backup(&zip_path, None, &cfg) {
-                        Ok(res) => {
-                            let resp_body = json!({
-                                "success": true,
-                                "message": format!("Restored {} files to {}", res.restored_files, res.target_path.display()),
-                                "result": res
-                            });
-                            let resp = Response::from_string(resp_body.to_string())
-                                .with_header(json_header);
-                            let _ = req.respond(resp);
-                        }
-                        Err(e) => {
-                            let resp_body = json!({
-                                "success": false,
-                                "message": e
-                            });
-                            let resp = Response::from_string(resp_body.to_string())
-                                .with_header(json_header);
-                            let _ = req.respond(resp);
-                        }
-                    }
+                    let message = match SaveRestore::restore_backup(&PathBuf::from(zip_path), None, &cfg) {
+                        Ok(res) => format!(
+                            "Restored {} files for {} to {}",
+                            res.restored_files,
+                            res.game_name,
+                            res.target_path.display()
+                        ),
+                        Err(e) => format!("Restore failed: {}", e),
+                    };
+
+                    let resp = Response::from_string(json!({ "message": message }).to_string())
+                        .with_header(json_header);
+                    let _ = req.respond(resp);
                     continue;
                 }
 
@@ -274,86 +169,28 @@ impl WebServer {
                     continue;
                 }
 
-                if url == "/api/achievements/overview" && method == Method::Get {
-                    let cfg = config_provider.lock().unwrap().clone();
-                    let overview = crate::achievements::AchievementCatalog::get_overall_summary(&cfg);
-                    let resp = Response::from_string(
-                        serde_json::to_string(&overview).unwrap_or_default(),
-                    )
-                    .with_header(json_header);
-                    let _ = req.respond(resp);
-                    continue;
-                }
-
-                if url == "/api/achievements/test" && method == Method::Post {
-                    let now = chrono::Utc::now().timestamp();
-                    let test_notif = AchievementNotification {
-                        game_name: "Steam / Project Lightning".to_string(),
-                        title: "Sager Master Unlocked".to_string(),
-                        description:
-                            "Achievement & Save Backup Companion successfully activated!"
-                                .to_string(),
-                        unlock_time: now,
-                    };
-                    let _ = notifier_tx.send(test_notif);
-
-                    let test_ach = Achievement {
-                        id: format!("test_ach_{}", now),
-                        game_name: "Steam / Project Lightning".to_string(),
-                        app_id: Some("480".to_string()),
-                        title: "Sager Master Unlocked".to_string(),
-                        description:
-                            "Achievement & Save Backup Companion successfully activated!"
-                                .to_string(),
-                        unlocked: true,
-                        unlock_time: Some(now),
-                        icon_path: None,
-                        launcher: Some("Project Lightning".to_string()),
-                        hidden: false,
-                    };
-                    crate::achievements::record_unlocked_achievement(&test_ach);
-
-                    let resp_body =
-                        json!({ "success": true, "message": "Test achievement alert triggered!" });
-                    let resp = Response::from_string(resp_body.to_string())
-                        .with_header(json_header);
-                    let _ = req.respond(resp);
-                    continue;
-                }
-
-                if url == "/api/config" && method == Method::Get {
-                    let cfg = config_provider.lock().unwrap().clone();
-                    let resp = Response::from_string(
-                        serde_json::to_string(&cfg).unwrap_or_default(),
-                    )
-                    .with_header(json_header);
-                    let _ = req.respond(resp);
-                    continue;
-                }
-
                 if url == "/api/config" && method == Method::Post {
                     let mut body = String::new();
                     let _ = req.as_reader().read_to_string(&mut body);
 
                     let mut cfg = config_provider.lock().unwrap();
                     if let Ok(val) = serde_json::from_str::<serde_json::Value>(&body) {
-                        if let Some(dir) =
-                            val.get("backup_directory").and_then(|v| v.as_str())
-                        {
-                            cfg.backup_directory = PathBuf::from(dir);
+                        if let Some(dir) = val.get("backup_directory").and_then(|v| v.as_str()) {
+                            if !dir.trim().is_empty() {
+                                cfg.backup_directory = PathBuf::from(dir.trim());
+                            }
                         }
-                        if let Some(bpd) = val.get("backups_per_day").and_then(|v| v.as_u64()) {
-                            cfg.set_backups_per_day(bpd as u32);
-                        } else if let Some(interval) = val
-                            .get("auto_backup_interval_minutes")
-                            .and_then(|v| v.as_u64())
+                        if let Some(interval) =
+                            val.get("auto_backup_interval_minutes").and_then(|v| v.as_u64())
                         {
-                            cfg.auto_backup_interval_minutes = interval;
-                            cfg.backups_per_day = Some((1440 / interval.max(1)).max(1) as u32);
+                            cfg.auto_backup_interval_minutes = interval.clamp(5, 1440);
                         }
-                        if let Some(sound) =
-                            val.get("sound_enabled").and_then(|v| v.as_bool())
+                        if let Some(auto) =
+                            val.get("auto_backup_enabled").and_then(|v| v.as_bool())
                         {
+                            cfg.auto_backup_enabled = auto;
+                        }
+                        if let Some(sound) = val.get("sound_enabled").and_then(|v| v.as_bool()) {
                             cfg.sound_enabled = sound;
                         }
                         if let Some(notif) =
@@ -361,482 +198,66 @@ impl WebServer {
                         {
                             cfg.notifications_enabled = notif;
                         }
-                        if let Some(auto) =
-                            val.get("auto_backup_enabled").and_then(|v| v.as_bool())
-                        {
-                            cfg.auto_backup_enabled = auto;
-                        }
-                        if let Some(l) = val.get("preferred_launcher").and_then(|v| v.as_str()) {
-                            cfg.preferred_launcher = l.to_string();
-                        }
-                        if let Some(show) = val.get("show_in_launcher").and_then(|v| v.as_bool()) {
-                            cfg.show_in_launcher = show;
-                        }
-                        if let Some(compact) = val.get("tray_compact_mode").and_then(|v| v.as_bool()) {
-                            cfg.tray_compact_mode = compact;
-                        }
-                        if let Some(side) = val.get("tray_side").and_then(|v| v.as_str()) {
-                            let s = side.to_lowercase();
-                            if s == "left" || s == "right" || s == "auto" {
-                                cfg.tray_side = s;
-                            }
-                        }
-                        if let Some(gdrive) = val.get("google_drive_exe") {
-                            if gdrive.is_null() || gdrive.as_str() == Some("") {
-                                cfg.google_drive_exe = None;
-                            } else if let Some(s) = gdrive.as_str() {
-                                cfg.google_drive_exe = Some(PathBuf::from(s));
-                            }
-                        }
-                        save_config(&cfg);
-                    }
-
-                    let resp_body =
-                        json!({ "success": true, "message": "Settings updated" });
-                    let resp = Response::from_string(resp_body.to_string())
-                        .with_header(json_header);
-                    let _ = req.respond(resp);
-                    continue;
-                }
-
-                if url == "/api/launcher/config" && method == Method::Post {
-                    let mut body = String::new();
-                    let _ = req.as_reader().read_to_string(&mut body);
-
-                    let mut cfg = config_provider.lock().unwrap();
-                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&body) {
-                        if let Some(l) = val.get("preferred_launcher").and_then(|v| v.as_str()) {
-                            cfg.preferred_launcher = l.to_string();
-                        }
-                        if let Some(show) = val.get("show_in_launcher").and_then(|v| v.as_bool()) {
-                            cfg.show_in_launcher = show;
-                        }
-                        if let Some(compact) = val.get("tray_compact_mode").and_then(|v| v.as_bool()) {
-                            cfg.tray_compact_mode = compact;
-                        }
                         let _ = save_config(&cfg);
                     }
 
-                    let resp_body = json!({
-                        "success": true,
-                        "preferred_launcher": cfg.preferred_launcher,
-                        "show_in_launcher": cfg.show_in_launcher,
-                        "tray_compact_mode": cfg.tray_compact_mode,
-                    });
-                    let resp = Response::from_string(resp_body.to_string())
+                    let resp = Response::from_string(json!({ "success": true }).to_string())
                         .with_header(json_header);
                     let _ = req.respond(resp);
                     continue;
                 }
 
-                if url == "/api/test-sound" && method == Method::Post {
-                    crate::audio::play_steam_achievement_sound();
-                    let resp_body = json!({
-                        "success": true,
-                        "message": "Steam achievement audio chime played (deck_ui_achievement_toast.wav)"
-                    });
-                    let resp = Response::from_string(resp_body.to_string())
-                        .with_header(json_header);
-                    let _ = req.respond(resp);
-                    continue;
-                }
-
-                if url == "/api/sound/steam-achievement.wav" && (method == Method::Get || method == Method::Head) {
-                    let audio_header = Header::from_bytes(&b"Content-Type"[..], &b"audio/wav"[..]).unwrap();
-                    let resp = Response::from_data(crate::audio::STEAM_ACHIEVEMENT_WAV).with_header(audio_header);
-                    let _ = req.respond(resp);
-                    continue;
-                }
-
-                if url == "/api/achievements/replay-overlay" && method == Method::Post {
+                if url == "/api/startup" && method == Method::Post {
                     let mut body = String::new();
                     let _ = req.as_reader().read_to_string(&mut body);
                     let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
-
-                    let game_name = parsed.get("game_name").and_then(|v| v.as_str()).unwrap_or("Steam Game");
-                    let title = parsed.get("title").and_then(|v| v.as_str()).unwrap_or("Achievement Unlocked!");
-                    let desc = parsed.get("description").and_then(|v| v.as_str()).unwrap_or("");
-
-                    crate::audio::play_steam_achievement_sound();
-                    crate::overlay::show_steam_overlay(game_name, title, desc);
-
-                    let resp_body = json!({
-                        "success": true,
-                        "message": format!("Steam in-game overlay displayed for '{}'", title)
-                    });
-                    let resp = Response::from_string(resp_body.to_string()).with_header(json_header);
+                    let enable = parsed.get("enabled").and_then(|v| v.as_bool());
+                    let (enabled, message) = toggle_startup(enable);
+                    let resp = Response::from_string(
+                        json!({ "enabled": enabled, "message": message }).to_string(),
+                    )
+                    .with_header(json_header);
                     let _ = req.respond(resp);
-                    continue;
-                }
-
-                if url == "/api/achievements/open-steam" && method == Method::Post {
-                    let mut body = String::new();
-                    let _ = req.as_reader().read_to_string(&mut body);
-                    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
-                    let app_id = parsed.get("app_id").and_then(|v| v.as_str()).unwrap_or("2215200");
-
-                    let steam_url = format!("steam://open/achievements/{}", app_id);
-                    let _ = open::that(&steam_url);
-
-                    let resp_body = json!({
-                        "success": true,
-                        "message": format!("Launched Steam achievements: {}", steam_url)
-                    });
-                    let resp = Response::from_string(resp_body.to_string()).with_header(json_header);
-                    let _ = req.respond(resp);
-                    continue;
-                }
-
-                if url == "/api/network/info" && method == Method::Get {
-                    let cfg = config_provider.lock().unwrap();
-                    let local_ip = get_local_ip();
-                    let port = cfg.web_port;
-                    let resp_body = json!({
-                        "local_ip": local_ip,
-                        "port": port,
-                        "mobile_sync_url": format!("http://{}:{}/api/mobile/sync", local_ip, port),
-                        "dashboard_url": format!("http://{}:{}", local_ip, port),
-                        "pc_name": std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Sager-PC".to_string())
-                    });
-                    let resp = Response::from_string(resp_body.to_string()).with_header(json_header);
-                    let _ = req.respond(resp);
-                    continue;
-                }
-
-                if url == "/api/mobile/sync" && method == Method::Get {
-                    let cfg = config_provider.lock().unwrap().clone();
-                    let achievements = load_achievements_history();
-                    let games = SaveScanner::scan_all(&cfg);
-                    let summaries = crate::achievements::AchievementCatalog::get_overall_summary(&cfg);
-                    let local_ip = get_local_ip();
-
-                    let resp_body = json!({
-                        "sager_version": "0.3.0",
-                        "pc_name": std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Sager-PC".to_string()),
-                        "local_ip": local_ip,
-                        "sync_timestamp": chrono::Utc::now().timestamp(),
-                        "total_games": games.len(),
-                        "unlocked_achievements_count": achievements.len(),
-                        "games": summaries,
-                        "unlocked_achievements": achievements,
-                        "preferred_launcher": cfg.preferred_launcher
-                    });
-                    let resp = Response::from_string(resp_body.to_string()).with_header(json_header);
-                    let _ = req.respond(resp);
-                    continue;
-                }
-
-                if (url == "/api/vault/export" || url == "/api/vault/export-download") && (method == Method::Get || method == Method::Post) {
-                    let cfg = config_provider.lock().unwrap().clone();
-                    let achievements = load_achievements_history();
-                    let games = SaveScanner::scan_all(&cfg);
-                    let now = chrono::Utc::now();
-
-                    let export_bundle = json!({
-                        "format": "sager_vault_export",
-                        "version": "0.3.0",
-                        "exported_at": now.to_rfc3339(),
-                        "timestamp": now.timestamp(),
-                        "pc_name": std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Sager-PC".to_string()),
-                        "achievements": achievements,
-                        "discovered_games": games,
-                        "config": {
-                            "backup_directory": cfg.backup_directory.to_string_lossy(),
-                            "auto_backup_enabled": cfg.auto_backup_enabled,
-                            "auto_backup_interval_minutes": cfg.auto_backup_interval_minutes,
-                            "preferred_launcher": cfg.preferred_launcher,
-                            "sound_enabled": cfg.sound_enabled
-                        }
-                    });
-
-                    let filename = format!("sager-vault-export-{}.json", now.format("%Y%m%d-%H%M%S"));
-                    let disp_header = Header::from_bytes(
-                        &b"Content-Disposition"[..],
-                        format!("attachment; filename=\"{}\"", filename).into_bytes(),
-                    ).unwrap();
-
-                    let resp = Response::from_string(export_bundle.to_string())
-                        .with_header(json_header)
-                        .with_header(disp_header);
-                    let _ = req.respond(resp);
-                    continue;
-                }
-
-                if url == "/api/vault/import" && method == Method::Post {
-                    let mut body = String::new();
-                    let _ = req.as_reader().read_to_string(&mut body);
-
-                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&body) {
-                        let mut imported_count = 0;
-                        if let Some(achs) = val.get("achievements").and_then(|v| v.as_array()) {
-                            for a in achs {
-                                if let Ok(ach) = serde_json::from_value::<Achievement>(a.clone()) {
-                                    crate::achievements::record_unlocked_achievement(&ach);
-                                    imported_count += 1;
-                                }
-                            }
-                        }
-
-                        let resp_body = json!({
-                            "success": true,
-                            "imported_count": imported_count,
-                            "message": format!("Successfully imported {} achievements into local Sager Vault!", imported_count)
-                        });
-                        let resp = Response::from_string(resp_body.to_string()).with_header(json_header);
-                        let _ = req.respond(resp);
-                    } else {
-                        let resp_body = json!({
-                            "success": false,
-                            "message": "Invalid JSON vault payload"
-                        });
-                        let resp = Response::from_string(resp_body.to_string())
-                            .with_header(json_header)
-                            .with_status_code(StatusCode(400));
-                        let _ = req.respond(resp);
-                    }
                     continue;
                 }
 
                 if url == "/api/open-folder" && method == Method::Post {
                     let cfg = config_provider.lock().unwrap().clone();
                     let _ = open::that(&cfg.backup_directory);
-                    let resp_body = json!({ "success": true });
-                    let resp = Response::from_string(resp_body.to_string())
+                    let resp = Response::from_string(json!({ "success": true }).to_string())
                         .with_header(json_header);
                     let _ = req.respond(resp);
                     continue;
                 }
 
-                if url == "/api/open-config-folder" && method == Method::Post {
-                    let config_dir = config::get_config_dir();
-                    let _ = open::that(&config_dir);
-                    let resp_body = json!({ "success": true, "path": config_dir.to_string_lossy() });
-                    let resp = Response::from_string(resp_body.to_string())
+                if url == "/api/launch-drive" && method == Method::Post {
+                    let cfg = config_provider.lock().unwrap().clone();
+                    let message = match config::launch_google_drive(&cfg) {
+                        Ok(()) => "Google Drive is starting up...".to_string(),
+                        Err(e) => e,
+                    };
+                    let resp = Response::from_string(json!({ "message": message }).to_string())
                         .with_header(json_header);
                     let _ = req.respond(resp);
                     continue;
                 }
 
-                if url == "/api/system/run-background" && method == Method::Post {
-                    crate::tray::hide_console();
-                    let now = chrono::Utc::now().timestamp();
-                    let notif = AchievementNotification {
-                        game_name: "Sager Companion".to_string(),
-                        title: "🛡️ Running in Background".to_string(),
-                        description: "Operating silently in your system tray. Save backups and achievements are actively monitored.".to_string(),
-                        unlock_time: now,
-                    };
-                    let _ = notifier_tx.send(notif);
-
-                    let resp_body = json!({
-                        "success": true,
-                        "message": "Sager is now running silently in the background.",
-                        "visible": false
-                    });
-                    let resp = Response::from_string(resp_body.to_string()).with_header(json_header);
-                    let _ = req.respond(resp);
-                    continue;
-                }
-
-                if url == "/api/system/make-appear" && method == Method::Post {
-                    crate::tray::show_console();
-                    let now = chrono::Utc::now().timestamp();
-                    let notif = AchievementNotification {
-                        game_name: "Sager Companion".to_string(),
-                        title: "👁️ Console Window Restored".to_string(),
-                        description: "Sager console window made visible in the foreground.".to_string(),
-                        unlock_time: now,
-                    };
-                    let _ = notifier_tx.send(notif);
-
-                    let resp_body = json!({
-                        "success": true,
-                        "message": "Sager console window made visible.",
-                        "visible": true
-                    });
-                    let resp = Response::from_string(resp_body.to_string()).with_header(json_header);
-                    let _ = req.respond(resp);
-                    continue;
-                }
-
-                if url == "/api/system/toggle-console" && method == Method::Post {
-                    let is_vis = crate::tray::toggle_console();
-                    let resp_body = json!({
-                        "success": true,
-                        "visible": is_vis,
-                        "message": if is_vis { "Console window made visible" } else { "Console window hidden to background" }
-                    });
-                    let resp = Response::from_string(resp_body.to_string()).with_header(json_header);
-                    let _ = req.respond(resp);
-                    continue;
-                }
-
-                if url == "/api/system/console-status" && method == Method::Get {
-                    let resp_body = json!({
-                        "visible": crate::tray::is_console_visible()
-                    });
-                    let resp = Response::from_string(resp_body.to_string()).with_header(json_header);
-                    let _ = req.respond(resp);
-                    continue;
-                }
-
-                if url == "/api/system/toggle-startup" && method == Method::Post {
-                    let (is_installed, msg) = toggle_windows_startup();
-                    let resp_body = json!({
-                        "success": true,
-                        "installed": is_installed,
-                        "message": msg
-                    });
-                    let resp = Response::from_string(resp_body.to_string()).with_header(json_header);
-                    let _ = req.respond(resp);
-                    continue;
-                }
-
-                if url == "/api/test/write-test" && method == Method::Post {
+                if url == "/api/mobile/sync" && method == Method::Get {
+                    // Kept for the Android companion app (local home Wi-Fi sync).
                     let cfg = config_provider.lock().unwrap().clone();
-                    let _ = std::fs::create_dir_all(&cfg.backup_directory);
-                    let test_file = cfg.backup_directory.join(".sager_diag_test.tmp");
-                    let start_time = std::time::Instant::now();
-                    
-                    match std::fs::write(&test_file, b"Sager Google Drive sync permission & latency test OK") {
-                        Ok(_) => {
-                            let elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0;
-                            let _ = std::fs::remove_file(&test_file);
-                            let resp_body = json!({
-                                "success": true,
-                                "message": format!("Write test passed in {:.2} ms! Directory is ready for cloud sync.", elapsed_ms),
-                                "latency_ms": elapsed_ms,
-                                "path": cfg.backup_directory.to_string_lossy()
-                            });
-                            let resp = Response::from_string(resp_body.to_string()).with_header(json_header);
-                            let _ = req.respond(resp);
-                        }
-                        Err(e) => {
-                            let resp_body = json!({
-                                "success": false,
-                                "message": format!("Write permission failed: {}", e),
-                                "path": cfg.backup_directory.to_string_lossy()
-                            });
-                            let resp = Response::from_string(resp_body.to_string()).with_header(json_header);
-                            let _ = req.respond(resp);
-                        }
-                    }
-                    continue;
-                }
-
-                if url == "/api/test/custom-achievement" && method == Method::Post {
-                    let mut body = String::new();
-                    let _ = req.as_reader().read_to_string(&mut body);
-                    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
-
-                    let game_name = parsed.get("game_name").and_then(|v| v.as_str()).unwrap_or("LEGO Batman: Legacy of the Dark Knight");
-                    let title = parsed.get("title").and_then(|v| v.as_str()).unwrap_or("Dynamic Duo");
-                    let desc = parsed.get("description").and_then(|v| v.as_str()).unwrap_or("Defeat 50 enemies as Batman and Robin in co-op.");
-                    let app_id = parsed.get("app_id").and_then(|v| v.as_str()).unwrap_or("2215200");
-
-                    let now = chrono::Utc::now().timestamp();
-                    let notif = AchievementNotification {
-                        game_name: game_name.to_string(),
-                        title: title.to_string(),
-                        description: desc.to_string(),
-                        unlock_time: now,
-                    };
-                    let _ = notifier_tx.send(notif);
-
-                    let ach = Achievement {
-                        id: format!("test_ach_{}", now),
-                        game_name: game_name.to_string(),
-                        app_id: Some(app_id.to_string()),
-                        title: title.to_string(),
-                        description: desc.to_string(),
-                        unlocked: true,
-                        unlock_time: Some(now),
-                        icon_path: None,
-                        launcher: Some("Steam / Project Lightning".to_string()),
-                        hidden: false,
-                    };
-                    crate::achievements::record_unlocked_achievement(&ach);
-
-                    let resp_body = json!({
-                        "success": true,
-                        "message": format!("Notification popped for '{}' in {}", title, game_name)
-                    });
-                    let resp = Response::from_string(resp_body.to_string()).with_header(json_header);
-                    let _ = req.respond(resp);
-                    continue;
-                }
-
-                if url == "/api/test/diagnostics" && method == Method::Get {
-                    let cfg = config_provider.lock().unwrap().clone();
-                    let drive = config::get_drive_status(&cfg);
-                    let games = SaveScanner::scan_all(&cfg);
-                    let total_games_size: u64 = games.iter().map(|g| g.total_size_bytes).sum();
-                    let backups = SaveRestore::list_all_backups(&cfg);
-                    let total_archives: usize = backups.iter().map(|b| b.1.len()).sum();
-                    let total_backup_size: u64 = backups.iter().flat_map(|b| &b.1).map(|a| a.size_bytes).sum();
                     let achievements = load_achievements_history();
+                    let games = SaveScanner::scan_all(&cfg);
 
-                    // Check write permission
-                    let _ = std::fs::create_dir_all(&cfg.backup_directory);
-                    let test_file = cfg.backup_directory.join(".sager_diag_test.tmp");
-                    let start_time = std::time::Instant::now();
-                    let (write_ok, latency_ms) = match std::fs::write(&test_file, b"Sager diag test") {
-                        Ok(_) => {
-                            let ms = start_time.elapsed().as_secs_f64() * 1000.0;
-                            let _ = std::fs::remove_file(&test_file);
-                            (true, ms)
-                        }
-                        Err(_) => (false, 0.0)
-                    };
-
-                    // Check Windows Startup shortcut
-                    let startup_installed = if let Ok(appdata) = std::env::var("APPDATA") {
-                        let lnk = PathBuf::from(appdata).join(r"Microsoft\Windows\Start Menu\Programs\Startup\Sager.lnk");
-                        lnk.exists()
-                    } else {
-                        false
-                    };
-
-                    let diag = json!({
-                        "google_drive": {
-                            "running": drive.google_drive_running,
-                            "installed": drive.google_drive_installed,
-                            "backup_dir": cfg.backup_directory.to_string_lossy(),
-                            "backup_dir_exists": drive.backup_dir_exists,
-                            "backup_dir_is_google_drive": drive.backup_dir_is_google_drive,
-                            "write_test_passed": write_ok,
-                            "write_latency_ms": latency_ms
-                        },
-                        "watcher": {
-                            "steam_detected": cfg.steam_path.is_some(),
-                            "steam_path": cfg.steam_path.as_ref().map(|p| p.to_string_lossy()),
-                            "goldberg_detected": cfg.goldberg_saves_path.is_some(),
-                            "goldberg_path": cfg.goldberg_saves_path.as_ref().map(|p| p.to_string_lossy()),
-                            "project_lightning_detected": cfg.project_lightning_path.is_some(),
-                            "project_lightning_path": cfg.project_lightning_path.as_ref().map(|p| p.to_string_lossy()),
-                        },
-                        "save_scanner": {
-                            "games_count": games.len(),
-                            "total_size_bytes": total_games_size
-                        },
-                        "cloud_backups": {
-                            "total_archives": total_archives,
-                            "total_size_bytes": total_backup_size
-                        },
-                        "achievements": {
-                            "total_unlocked": achievements.len()
-                        },
-                        "system": {
-                            "sound_enabled": cfg.sound_enabled,
-                            "notifications_enabled": cfg.notifications_enabled,
-                            "auto_backup_enabled": cfg.auto_backup_enabled,
-                            "backups_per_day": cfg.get_backups_per_day(),
-                            "startup_shortcut_installed": startup_installed,
-                            "config_path": config::get_config_file_path().to_string_lossy()
-                        }
+                    let resp_body = json!({
+                        "sager_version": env!("CARGO_PKG_VERSION"),
+                        "pc_name": std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Sager-PC".to_string()),
+                        "sync_timestamp": chrono::Utc::now().timestamp(),
+                        "total_games": games.len(),
+                        "unlocked_achievements_count": achievements.len(),
+                        "preferred_launcher": "Steam",
+                        "unlocked_achievements": achievements,
                     });
-
-                    let resp = Response::from_string(diag.to_string()).with_header(json_header);
+                    let resp = Response::from_string(resp_body.to_string()).with_header(json_header);
                     let _ = req.respond(resp);
                     continue;
                 }
@@ -849,55 +270,64 @@ impl WebServer {
     }
 }
 
-pub fn toggle_windows_startup() -> (bool, String) {
+#[derive(serde::Serialize)]
+struct GameView {
+    name: String,
+    source_path: String,
+    save_category: String,
+    total_size_bytes: u64,
+    files_count: usize,
+    last_modified: Option<i64>,
+    last_backup: Option<String>,
+    backups_count: usize,
+}
+
+fn list_games_with_backup_info(config: &SagerConfig) -> Vec<GameView> {
+    SaveScanner::scan_all(config)
+        .into_iter()
+        .map(|g| {
+            let backups = SaveRestore::list_backups_for_game(&g.name, config);
+            let last_backup = backups
+                .first()
+                .and_then(|b| {
+                    b.manifest
+                        .as_ref()
+                        .map(|m| m.backup_date_str.clone())
+                });
+            GameView {
+                name: g.name,
+                source_path: g.source_path.to_string_lossy().to_string(),
+                save_category: g.save_category,
+                total_size_bytes: g.total_size_bytes,
+                files_count: g.files_count,
+                last_modified: g.last_modified,
+                last_backup,
+                backups_count: backups.len(),
+            }
+        })
+        .collect()
+}
+
+fn is_startup_installed() -> bool {
     if let Ok(appdata) = std::env::var("APPDATA") {
-        let lnk = PathBuf::from(&appdata)
-            .join(r"Microsoft\Windows\Start Menu\Programs\Startup\Sager.lnk");
-        if lnk.exists() {
-            let _ = std::fs::remove_file(&lnk);
-            (
-                false,
-                "Removed Sager from Windows Startup. It will not launch automatically on boot."
-                    .to_string(),
-            )
-        } else {
-            let exe_path = std::env::current_exe().unwrap_or_else(|_| {
-                PathBuf::from(r"C:\Mein Projekts\Sager\target\release\sager.exe")
-            });
-            let cur_dir = exe_path
-                .parent()
-                .unwrap_or_else(|| std::path::Path::new(r"C:\Mein Projekts\Sager"));
-            let ps_cmd = format!(
-                "$s = (New-Object -ComObject WScript.Shell).CreateShortcut('{}'); $s.TargetPath = '{}'; $s.Arguments = '--background'; $s.WorkingDirectory = '{}'; $s.Save()",
-                lnk.to_string_lossy().replace('\'', "''"),
-                exe_path.to_string_lossy().replace('\'', "''"),
-                cur_dir.to_string_lossy().replace('\'', "''"),
-            );
-            let _ = std::process::Command::new("powershell")
-                .args(["-NoProfile", "-Command", &ps_cmd])
-                .output();
-            (
-                true,
-                "Added Sager to Windows Startup in silent background mode (--background)."
-                    .to_string(),
-            )
-        }
+        PathBuf::from(appdata)
+            .join(r"Microsoft\Windows\Start Menu\Programs\Startup\Sager.lnk")
+            .exists()
     } else {
-        (false, "Failed to resolve APPDATA path".to_string())
+        false
     }
 }
 
-pub fn get_local_ip() -> String {
-    use std::net::UdpSocket;
-    if let Ok(socket) = UdpSocket::bind("0.0.0.0:0") {
-        if socket.connect("8.8.8.8:80").is_ok() {
-            if let Ok(addr) = socket.local_addr() {
-                let ip_str = addr.ip().to_string();
-                if ip_str != "0.0.0.0" && ip_str != "127.0.0.1" {
-                    return ip_str;
-                }
-            }
-        }
+/// Toggle (or force-set) the "Start with Windows" shortcut.
+fn toggle_startup(enable: Option<bool>) -> (bool, String) {
+    let installed = is_startup_installed();
+    let target = match enable {
+        Some(v) => v,
+        None => !installed,
+    };
+
+    match set_windows_startup(target) {
+        Ok((state, message)) => (state, message),
+        Err(message) => (installed, message),
     }
-    "127.0.0.1".to_string()
 }
