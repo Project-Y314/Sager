@@ -16,14 +16,14 @@
 
 ## Download & use (1 minute)
 
-1. Grab **[sager.exe](https://github.com/ybreakless/Sager/releases/latest)** (`sager.exe` from the latest release — ~1.5 MB, also available as a zip).
+1. Grab **[sager.exe](https://github.com/Project-Y314/Sager/releases/latest)** (`sager.exe` from the latest release — ~1.5 MB, also available as a zip).
 2. Double-click it. It lives silently in your system tray — that's it, you're installed.
 
-Ready-to-go binaries for every release are published on the [Releases tab](https://github.com/ybreakless/Sager/releases).
+Ready-to-go binaries for every release are published on the [Releases tab](https://github.com/Project-Y314/Sager/releases).
 
 > Prefer to build it yourself?
 > ```powershell
-> git clone https://github.com/ybreakless/Sager.git
+> git clone https://github.com/Project-Y314/Sager.git
 > cd Sager
 > cargo build --release
 > # -> target\release\sager.exe
