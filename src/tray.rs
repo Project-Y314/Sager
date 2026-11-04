@@ -58,49 +58,19 @@ pub fn to_wide_chars(s: &str) -> Vec<u16> {
     OsStr::new(s).encode_wide().chain(Some(0)).collect()
 }
 
-/// Renders the Sager badge icon (rounded square, gold star emblem) as a sharp 32x32 tray icon.
+fn coverage(d: f32) -> u32 {
+    if d >= 1.0 {
+        return 0;
+    }
+    if d < 0.55 {
+        return 255;
+    }
+    (255.0 * (1.0 - (d - 0.55) / 0.45).clamp(0.0, 1.0)) as u32
+}
+
 fn create_sager_icon() -> isize {
     unsafe {
-        let mut pixels = [0u32; 32 * 32];
-
-        for y in 0..32 {
-            for x in 0..32 {
-                let dx = (x as f32 - 15.5).abs();
-                let dy = (y as f32 - 15.5).abs();
-                let dist = (dx.powi(4) + dy.powi(4)).powf(0.25);
-
-                if dist > 14.5 {
-                    pixels[y * 32 + x] = 0; // Transparent outside the badge
-                    continue;
-                }
-
-                // Outer ring + star + body colors
-                let mut is_star = false;
-                if y >= 16 && y <= 23 && x >= 12 && x <= 19 {
-                    let sx = x as f32 - 15.5;
-                    let sy = y as f32 - 19.5;
-                    let sr = (sx * sx + sy * sy).sqrt();
-                    let angle = sy.atan2(sx);
-                    let star_radius =
-                        1.3 + 2.0 * (5.0 * angle - std::f32::consts::FRAC_PI_2).cos().max(0.0);
-                    if sr <= star_radius {
-                        is_star = true;
-                    }
-                }
-
-                if is_star {
-                    // Gold star
-                    pixels[y * 32 + x] = pack(251, 191, 36, 255);
-                } else if dist >= 13.0 {
-                    // Ring
-                    pixels[y * 32 + x] = pack(245, 250, 255, 255);
-                } else {
-                    // Dark navy body
-                    pixels[y * 32 + x] = pack(15, 23, 42, 245);
-                }
-            }
-        }
-
+        let pixels = outline_icon_pixels();
         let hbm_color = CreateBitmap(32, 32, 1, 32, pixels.as_ptr() as *const _);
         let mask = [0u8; 128];
         let hbm_mask = CreateBitmap(32, 32, 1, 1, mask.as_ptr() as *const _);
@@ -131,8 +101,157 @@ fn create_sager_icon() -> isize {
     }
 }
 
-fn pack(r: u8, g: u8, b: u8, a: u32) -> u32 {
-    (a << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
+// ── Outline geometry helpers (distances to strokes, so the icon can be
+//    previewed in a unit test and ported to the tray bitmap 1:1) ──
+
+/// Signed distance to a rounded rectangle's boundary (outline stroke).
+fn sd_roundbox_outline(px: f32, py: f32, cx: f32, cy: f32, hx: f32, hy: f32, r: f32) -> f32 {
+    let qx = (px - cx).abs() - hx + r;
+    let qy = (py - cy).abs() - hy + r;
+    let outside = ((qx.max(0.0)).powi(2) + (qy.max(0.0)).powi(2)).sqrt();
+    outside + qx.max(qy).min(0.0) - r
+}
+
+/// Distance to a vertical segment (x constant).
+fn seg_v_dist(px: f32, py: f32, x: f32, y0: f32, y1: f32) -> f32 {
+    let t = py.clamp(y0.min(y1), y0.max(y1));
+    ((px - x).powi(2) + (py - t).powi(2)).sqrt()
+}
+
+/// Distance to a circular arc (cx, cy, radius) restricted to the angular
+/// span [a0, a1) in degrees. Angles use screen coordinates (y down).
+fn arc_dist(px: f32, py: f32, cx: f32, cy: f32, r: f32, a0: f32, a1: f32) -> f32 {
+    let dx = px - cx;
+    let dy = py - cy;
+    let len = (dx * dx + dy * dy).sqrt();
+    let mut theta = dy.atan2(dx).to_degrees();
+    // normalize into [a0, a0 + 360)
+    let span = a1 - a0;
+    while theta < a0 {
+        theta += 360.0;
+    }
+    while theta >= a0 + 360.0 {
+        theta -= 360.0;
+    }
+    if theta < a0 + span {
+        (len - r).abs()
+    } else {
+        // nearest arc endpoint
+        let (ex, ey) = {
+            let a = if (theta - a0).abs() < (theta - a1).abs() {
+                a0
+            } else {
+                a1
+            };
+            let rad = a.to_radians();
+            (cx + r * rad.cos(), cy + r * rad.sin())
+        };
+        ((px - ex).powi(2) + (py - ey).powi(2)).sqrt()
+    }
+}
+
+/// The shackle: a U-shaped stroke (left leg, top arc, right leg).
+fn shackle_dist(px: f32, py: f32) -> f32 {
+    seg_v_dist(px, py, 10.4, 8.0, 14.0)
+        .min(arc_dist(px, py, 16.0, 8.0, 5.6, 180.0, 360.0))
+        .min(seg_v_dist(px, py, 21.6, 8.0, 14.0))
+}
+
+/// The keyhole: small ring + stem, drawn in the accent cyan.
+fn key_dist(px: f32, py: f32) -> f32 {
+    let dx = px - 16.0;
+    let dy = py - 19.0;
+    let ring = ((dx * dx + dy * dy).sqrt() - 2.3).abs();
+    ring.min(seg_v_dist(px, py, 16.0, 21.0, 24.2))
+}
+
+fn outline_icon_pixels() -> [u32; 32 * 32] {
+    let mut pixels = [0u32; 32 * 32];
+    for y in 0..32 {
+        for x in 0..32 {
+            let px = x as f32 + 0.5;
+            let py = y as f32 + 0.5;
+
+            let d_body = sd_roundbox_outline(px, py, 16.0, 20.0, 7.6, 5.8, 2.5).abs();
+            let d_shackle = shackle_dist(px, py);
+            let d_key = key_dist(px, py);
+
+            let mut d = d_body.min(d_shackle);
+            let mut cyan = false;
+            if d_key < d {
+                d = d_key;
+                cyan = true;
+            }
+
+            let alpha = coverage(d);
+            if alpha > 0 {
+                let (r, g, b) = if cyan {
+                    (126u32, 200u32, 244u32)
+                } else {
+                    (255u32, 255u32, 255u32)
+                };
+                pixels[y * 32 + x] = (alpha << 24) | (r << 16) | (g << 8) | b;
+            }
+        }
+    }
+    pixels
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Renders the tray icon over a dark and a light background so the
+    /// outline can be reviewed: target\tray_icon_preview.bmp
+    #[test]
+    fn render_preview_bitmap() {
+        let icon = outline_icon_pixels();
+        let w = 72usize;
+        let h = 32usize;
+        let mut out = vec![0u8; 54 + w * h * 4];
+
+        // BMP headers
+        out[0] = b'B';
+        out[1] = b'M';
+        let file_size = (out.len()) as u32;
+        out[2..6].copy_from_slice(&file_size.to_le_bytes());
+        out[10..14].copy_from_slice(&54u32.to_le_bytes());
+        out[14..18].copy_from_slice(&(40u32).to_le_bytes());
+        out[18..22].copy_from_slice(&(w as i32).to_le_bytes());
+        out[22..26].copy_from_slice(&(-(h as i32)).to_le_bytes());
+        out[26..28].copy_from_slice(&1u16.to_le_bytes());
+        out[28..30].copy_from_slice(&32u16.to_le_bytes());
+
+        for y in 0..h {
+            for x in 0..w {
+                // background: dark navy strip on the left, white strip on the right
+                let (br, bg, bb) = if x < 36 {
+                    (15u8, 23u8, 42u8)
+                } else {
+                    (250u8, 250u8, 250u8)
+                };
+                // icon is sampled twice: dark half uses x, light half uses x - 36
+                let ix = (if x < 36 { x } else { x - 36 }).min(31);
+                let a = icon[y * 32 + ix];
+                let ia = ((a >> 24) & 0xFF) as u32;
+                let ir = ((a >> 16) & 0xFF) as u32;
+                let ig = ((a >> 8) & 0xFF) as u32;
+                let ib = (a & 0xFF) as u32;
+                let mix = |fg: u32, bk: u8| (fg * ia + (bk as u32) * (255 - ia)) / 255;
+                let pos = 54 + (y * w + x) * 4;
+                out[pos] = mix(ib, bb) as u8;
+                out[pos + 1] = mix(ig, bg) as u8;
+                out[pos + 2] = mix(ir, br) as u8;
+                out[pos + 3] = 255;
+            }
+        }
+
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("tray_icon_preview.bmp");
+        std::fs::write(&path, &out).unwrap();
+        println!("preview written to {}", path.display());
+    }
 }
 
 #[derive(Clone, Copy)]
